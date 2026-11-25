@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from tkinter import filedialog, messagebox, ttk
 
 from iphone_backup_decrypt import EncryptedBackup
+from readable import make_readable
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi", ".3gp"}
@@ -106,71 +107,6 @@ def classify(domain, rel, apps, everything):
     return None
 
 
-# ---------- readable exports ----------
-def decode_attributed(blob):
-    """Newer iOS keeps message text inside a binary blob; pull the text out."""
-    try:
-        text = blob.split(b"NSString")[1][5:]
-        if text[0] == 0x81:
-            length, start = int.from_bytes(text[1:3], "little"), 3
-        else:
-            length, start = text[0], 1
-        return text[start:start + length].decode("utf-8", "ignore")
-    except Exception:
-        return ""
-
-
-def export_messages(out, log):
-    db = os.path.join(out, "Messages", "sms.db")
-    if not os.path.exists(db):
-        return
-    con = sqlite3.connect(db)
-    rows = con.execute("""
-        SELECT m.date, m.is_from_me, h.id, c.chat_identifier, m.text, m.attributedBody, m.cache_has_attachments
-        FROM message m
-        LEFT JOIN handle h ON h.ROWID = m.handle_id
-        LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-        LEFT JOIN chat c ON c.ROWID = cmj.chat_id
-        ORDER BY m.date""").fetchall()
-    con.close()
-    path = os.path.join(out, "Messages", "messages.csv")
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["date", "direction", "contact", "chat", "text", "has_attachment"])
-        for date, mine, handle, chat, text, blob, att in rows:
-            if not text and blob:
-                text = decode_attributed(blob)
-            w.writerow([apple_time(date), "sent" if mine else "received", handle or "", chat or "", text or "", att])
-    log(f"Messages: wrote {len(rows)} messages to Messages\\messages.csv")
-
-
-def export_whatsapp(out, log):
-    db = os.path.join(out, "WhatsApp", "Database", "ChatStorage.sqlite")
-    if not os.path.exists(db):
-        return
-    con = sqlite3.connect(db)
-    rows = con.execute("""
-        SELECT m.ZMESSAGEDATE, m.ZISFROMME, c.ZPARTNERNAME, c.ZCONTACTJID, m.ZFROMJID, m.ZTEXT, mi.ZMEDIALOCALPATH
-        FROM ZWAMESSAGE m
-        LEFT JOIN ZWACHATSESSION c ON c.Z_PK = m.ZCHATSESSION
-        LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
-        ORDER BY m.ZMESSAGEDATE""").fetchall()
-    con.close()
-    chats = {}
-    for date, mine, name, jid, sender, text, media in rows:
-        chats.setdefault((name or jid or "unknown", jid or ""), []).append(
-            [apple_time(date), "me" if mine else (sender or ""), text or "", media or ""])
-    folder = os.path.join(out, "WhatsApp", "Chats")
-    os.makedirs(folder, exist_ok=True)
-    for (name, jid), msgs in chats.items():
-        fname = clean(f"{name} ({jid.split('@')[0]})" if jid and jid.split("@")[0] not in name else name)[:120]
-        with open(long_path(os.path.join(folder, fname + ".csv")), "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            w.writerow(["date", "from", "text", "media_file (relative to WhatsApp folder)"])
-            w.writerows(msgs)
-    log(f"WhatsApp: wrote {len(rows)} messages in {len(chats)} chats to WhatsApp\\Chats")
-
-
 # ---------- main job ----------
 def run_extraction(backup_dir, out_dir, password, apps, everything, log, progress, cancelled):
     backup_dir = find_backup(backup_dir)
@@ -225,11 +161,7 @@ def run_extraction(backup_dir, out_dir, password, apps, everything, log, progres
                 progress(n, len(items))
         log(f"Extracted {done} files. Not in backup: {missing}. Failed: {failed}.")
 
-        for fn in (export_messages, export_whatsapp):
-            try:
-                fn(out_dir, log)
-            except Exception as e:
-                log(f"Could not build {fn.__name__.replace('export_', '')} export: {type(e).__name__}: {e}")
+        make_readable(out_dir, log)
         return out_dir
     finally:
         backup._cleanup()  # removes the temporary decrypted index
@@ -272,6 +204,8 @@ class App(tk.Tk):
         self.start_btn.pack(side="left")
         self.cancel_btn = ttk.Button(row, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=6)
+        self.readable_btn = ttk.Button(row, text="Rebuild readable pages only (no password)", command=self.rebuild)
+        self.readable_btn.pack(side="left", padx=6)
         self.bar = ttk.Progressbar(f, maximum=100)
         self.bar.grid(row=6, column=0, columnspan=3, sticky="ew", pady=4)
         self.logbox = tk.Text(f, height=14, state="disabled", wrap="word")
@@ -320,6 +254,22 @@ class App(tk.Tk):
         args = (self.backup.get(), self.out.get(), self.pw.get(), self.apps.get(), self.everything.get())
         self.worker = threading.Thread(target=self.work, args=args, daemon=True)
         self.worker.start()
+
+    def rebuild(self):
+        out = self.out.get()
+        if not os.path.isdir(out):
+            messagebox.showwarning("Missing folder", "The 'Save to' folder doesn't exist yet.")
+            return
+        self.start_btn.configure(state="disabled")
+        threading.Thread(target=self.rebuild_work, args=(out,), daemon=True).start()
+
+    def rebuild_work(self, out):
+        try:
+            make_readable(out, self.log)
+            self.q.put(("done", os.path.join(out, "START HERE.html")))
+        except Exception as e:
+            self.log(f"ERROR: {e}")
+            self.q.put(("done", None))
 
     def cancel(self):
         self.stop = True
