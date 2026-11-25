@@ -426,10 +426,140 @@ def calls(out, names, log):
     log(f"Calls: {len(rows)} -> Call History\\calls.html")
 
 
+# ---------- media galleries ----------
+KINDS = {}
+for _ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+    KINDS[_ext] = "p"
+for _ext in (".heic", ".heif", ".heics"):
+    KINDS[_ext] = "h"
+for _ext in (".mp4", ".mov", ".m4v", ".3gp", ".avi"):
+    KINDS[_ext] = "v"
+for _ext in (".opus", ".m4a", ".mp3", ".caf", ".amr", ".aac", ".wav"):
+    KINDS[_ext] = "a"
+for _ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".vcf"):
+    KINDS[_ext] = "d"
+SKIP_DIRS = {"previews", "thumbnails", "stickercache"}
+
+GALLERY_JS = r"""
+const K={p:'Photos',h:'Photos (HEIC)',v:'Videos',a:'Audio',d:'Documents'};
+let kind='all',q='',asc=false,list=[],shown=0,cur=-1;
+const grid=document.getElementById('g'),cnt=document.getElementById('c');
+const url=r=>r.split('/').map(encodeURIComponent).join('/');
+const day=t=>new Date(t*1000).toLocaleString();
+function filter(){const s=q.toLowerCase();
+ list=D.filter(d=>(kind==='all'||d[1]===kind||(kind==='p'&&d[1]==='h'))&&(!s||(d[0]+' '+d[3]).toLowerCase().includes(s)));
+ list.sort((a,b)=>asc?a[2]-b[2]:b[2]-a[2]);grid.innerHTML='';shown=0;more();
+ cnt.textContent=list.length+' of '+D.length+' items';}
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){const el=e.target;io.unobserve(el);
+ if(el.dataset.src){el.src=el.dataset.src;}}}),{rootMargin:'600px'});
+function tile(d,i){const t=document.createElement('div');t.className='tile';const u=url(d[0]);
+ const cap='<div class="cap">'+esc(d[3]||'')+'<br>'+day(d[2])+'</div>';
+ if(d[1]==='p'){t.innerHTML='<img>'+cap;const im=t.firstChild;im.dataset.src=u;io.observe(im);im.onclick=()=>open(i);}
+ else if(d[1]==='v'){t.innerHTML='<video controls preload="none"></video>'+cap;const v=t.firstChild;v.dataset.src=u;io.observe(v);}
+ else if(d[1]==='a'){t.innerHTML='<div class="ico">Audio</div><audio controls preload="none" src="'+u+'"></audio>'+cap;}
+ else{t.innerHTML='<a class="ico" href="'+u+'" target="_blank">'+(d[1]==='h'?'HEIC photo':'Document')+'<br><small>'+esc(d[0].split('/').pop())+'</small></a>'+cap;}
+ return t;}
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function more(){const end=Math.min(shown+300,list.length);for(let i=shown;i<end;i++)grid.appendChild(tile(list[i],i));shown=end;}
+new IntersectionObserver(es=>{if(es[0].isIntersecting&&shown<list.length)more();},{rootMargin:'800px'}).observe(document.getElementById('end'));
+function open(i){cur=i;const d=list[i],lb=document.getElementById('lb');lb.style.display='flex';
+ lb.innerHTML='<img src="'+url(d[0])+'"><div>'+esc(d[3]||'')+' · '+day(d[2])+' · <a href="'+url(d[0])+'" target="_blank">open file</a></div>';}
+document.getElementById('lb').onclick=e=>{if(e.target.tagName!=='A')e.currentTarget.style.display='none';};
+document.onkeydown=e=>{const lb=document.getElementById('lb');if(lb.style.display!=='flex')return;
+ if(e.key==='Escape')lb.style.display='none';
+ else if(e.key==='ArrowRight'){let j=cur+1;while(j<list.length&&list[j][1]!=='p')j++;if(j<list.length)open(j);}
+ else if(e.key==='ArrowLeft'){let j=cur-1;while(j>=0&&list[j][1]!=='p')j--;if(j>=0)open(j);}};
+document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>{kind=b.dataset.k;filter();});
+document.getElementById('s').oninput=e=>{q=e.target.value;filter();};
+document.getElementById('o').onclick=e=>{asc=!asc;e.target.textContent=asc?'Oldest first':'Newest first';filter();};
+filter();
+"""
+
+GALLERY_CSS = """.bar{position:sticky;top:0;background:#111b21;padding:8px 0;z-index:5}button{background:#202c33;color:#e9edef;border:1px solid #333;
+border-radius:6px;padding:6px 12px;margin:2px;cursor:pointer}button:hover{background:#2a3942}
+#g{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}.tile{background:#202c33;border-radius:8px;padding:6px;overflow:hidden}
+.tile img,.tile video{width:100%;height:170px;object-fit:cover;max-width:none;max-height:none;margin:0;cursor:zoom-in;background:#0b141a}
+.tile audio{width:100%}.ico{display:flex;flex-direction:column;align-items:center;justify-content:center;height:90px;text-align:center;color:#7cc4ff;word-break:break-all}
+.cap{font-size:11px;color:#8696a0;margin-top:4px;overflow:hidden;text-overflow:ellipsis}
+#lb{display:none;position:fixed;inset:0;background:#000e;z-index:9;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+#lb img{max-width:95vw;max-height:88vh;object-fit:contain;max-height:88vh}"""
+
+
+def build_gallery(out, source, title, labels, log):
+    import json
+    root = os.path.join(out, source)
+    if not os.path.isdir(root):
+        return
+    items = []
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
+        for f in files:
+            kind = KINDS.get(os.path.splitext(f)[1].lower())
+            if not kind:
+                continue
+            full = os.path.join(dp, f)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            if rel.startswith("Chats/") or rel.startswith("Readable/"):
+                continue
+            try:
+                ts = int(os.path.getmtime(full))
+            except OSError:
+                continue
+            items.append([rel, kind, ts, labels(rel)])
+    data = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
+    btns = "".join(f'<button data-k="{k}">{n}</button>' for k, n in
+                   (("all", "All"), ("p", "Photos"), ("v", "Videos"), ("a", "Audio"), ("d", "Documents")))
+    body = (f'<div class="bar">{btns}<button id="o">Newest first</button> <span id="c" class="t"></span>'
+            f'<input id="s" placeholder="Search by chat or file name..."></div><div id="g"></div><div id="end"></div>'
+            f'<div id="lb"></div><style>{GALLERY_CSS}</style><script>const D={data};{GALLERY_JS}</script>')
+    write(os.path.join(root, "gallery.html"), page(title, body))
+    counts = {}
+    for it in items:
+        counts[it[1]] = counts.get(it[1], 0) + 1
+    log(f"{title}: {len(items)} items ({counts.get('p', 0) + counts.get('h', 0)} photos, "
+        f"{counts.get('v', 0)} videos, {counts.get('a', 0)} audio, {counts.get('d', 0)} docs) -> {source}\\gallery.html")
+
+
+def galleries(out, names, log):
+    # WhatsApp: label each file with its chat
+    wa_labels = {}
+    db = os.path.join(out, "WhatsApp", "Database", "ChatStorage.sqlite")
+    if os.path.exists(db):
+        con = connect(db)
+        for pname, jid in con.execute("SELECT ZPARTNERNAME, ZCONTACTJID FROM ZWACHATSESSION"):
+            if jid:
+                wa_labels[safe(jid)] = pname or names.get(jid, jid)
+        con.close()
+    build_gallery(out, "WhatsApp", "WhatsApp media",
+                  lambda rel: wa_labels.get(rel.split("/")[1] if rel.startswith("Media/") and rel.count("/") > 1 else "", ""), log)
+
+    # Messages: label each attachment with its chat
+    sms_labels = {}
+    db = os.path.join(out, "Messages", "sms.db")
+    if os.path.exists(db):
+        con = connect(db)
+        members = {}
+        for cid, hid in con.execute("SELECT j.chat_id, h.id FROM chat_handle_join j JOIN handle h ON h.ROWID=j.handle_id"):
+            members.setdefault(cid, []).append(hid)
+        for fn, ident, disp, cid in con.execute(
+                """SELECT a.filename, c.chat_identifier, c.display_name, c.ROWID FROM attachment a
+                   JOIN message_attachment_join j ON j.attachment_id=a.ROWID
+                   JOIN chat_message_join cm ON cm.message_id=j.message_id JOIN chat c ON c.ROWID=cm.chat_id
+                   WHERE a.filename IS NOT NULL"""):
+            if "Library/SMS/" in fn:
+                m = members.get(cid, [])
+                sms_labels["/".join(safe(p) for p in fn.split("Library/SMS/", 1)[1].split("/"))] = \
+                    disp or (", ".join(names.get(x) for x in m) if len(m) > 1 else names.get(ident, ident))
+        con.close()
+    build_gallery(out, "Messages", "Messages media", lambda rel: sms_labels.get(rel, ""), log)
+
+    build_gallery(out, "Notes", "Notes media", lambda rel: "", log)
+
+
 # ---------- entry point ----------
 def make_readable(out, log):
     names = Names(out)
-    for fn in (messages, whatsapp, safari, notes, contacts, calls, calendar):
+    for fn in (messages, whatsapp, safari, notes, contacts, calls, calendar, galleries):
         try:
             fn(out, names, log)
         except Exception as e:
@@ -437,7 +567,9 @@ def make_readable(out, log):
     links = [("Messages\\Chats\\index.html", "Messages"), ("WhatsApp\\Chats\\index.html", "WhatsApp chats"),
              ("Notes\\notes.html", "Notes"), ("Safari\\history.html", "Safari history"),
              ("Safari\\bookmarks.html", "Safari bookmarks"), ("Contacts\\contacts.html", "Contacts"),
-             ("Call History\\calls.html", "Call history"), ("Calendar\\calendar.html", "Calendar")]
+             ("Call History\\calls.html", "Call history"), ("Calendar\\calendar.html", "Calendar"),
+             ("WhatsApp\\gallery.html", "WhatsApp media gallery"), ("Messages\\gallery.html", "Messages media gallery"),
+             ("Notes\\gallery.html", "Notes media gallery")]
     items = "".join(f'<p><a href="{quote(p.replace(chr(92), "/"))}">{t}</a></p>'
                     for p, t in links if os.path.exists(os.path.join(out, p)))
     write(os.path.join(out, "START HERE.html"), page("Your iPhone backup", items))
